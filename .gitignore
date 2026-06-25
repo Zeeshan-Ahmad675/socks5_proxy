@@ -1,0 +1,7 @@
+.pijul
+build
+.ignore
+.cache
+.clangd
+test.cc
+t
