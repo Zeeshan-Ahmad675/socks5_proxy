@@ -1,10 +1,13 @@
 #include "fd_util.h"
 #include <fcntl.h>  // fcntl()
+#include <sys/timerfd.h>
 #include <unistd.h> // read()
 #include <sys/socket.h> // accept()
 #include <errno.h>  // errno
-#include <iostream> // perror(), cerr
+#include <ctime>
 #include <cstring> // strerror()
+#include <cstdint> //uint8_t
+#include <iostream> // perror(), cerr
 
 File_Descriptor::File_Descriptor()
 : _fd (-1) {}
@@ -27,28 +30,7 @@ int File_Descriptor::get_status_flags() const
 {
     int flags;
     if ((flags = fcntl(_fd, F_GETFL)) == -1) {
-        switch (errno) {
-            case EBADF:
-                std::cerr << "Error: " << _fd << " is not an open file descriptor - EBADF" << std::endl;
-                perror("fcntl F_GETFL");
-                break;
-            case EACCES:
-                std::cerr << "Error: Operation is prohibited by locks held by other processes - EACCES" << std::endl;
-                perror("fcntl F_GETFL");
-                break;
-            case EAGAIN:
-                std::cerr << "Error: The operation is prohibited because the file has been memory-mapped by another process - EAGAIN" << std::endl;
-                perror("fcntl F_GETFL");
-                break;
-            case EINVAL:
-                std::cerr << "The value F_GETFL is not recognized by this kernel - EINVAL" << std::endl;
-                perror("fcntl F_GETFL");
-                break;
-            default:
-                std::cerr << "Error: Unknown error (errno=" << errno << ") - " << strerror(errno) << std::endl;
-                perror("fcntl F_GETFL");
-                break;
-        }
+        perror("File_Descriptor: get_status_flags: fcntl GETFL");
         return -1;
     }
     return flags;
@@ -57,18 +39,24 @@ int File_Descriptor::get_status_flags() const
 int File_Descriptor::add_status_flags(int flags) const
 {
     int f = get_status_flags();
+    if (f == -1) return -1;
 
     if (fcntl(_fd, F_SETFL, f | flags) == -1)
-        handle_error();
+    {
+        perror("File_Descriptor: add_status_flags: fcntl SETFL");
+        return -1;
+    }
     else
         return 0;
 }
 
-int File_Descriptor::nonblocking_read(void* buffer, size_t nbytes, uint32_t& read_avail)
+int File_Descriptor::nonblocking_read(void* buffer, size_t nbytes, bool& read_avail)
 {
-    ssize_t n = 0, i;
+    if (!read_avail || nbytes <= 0) return 0;
+
+    ssize_t n = 0, i = 0;
     do {
-        i = read(_fd, (char*)buffer + n, nbytes - n);
+        i = read(_fd, (uint8_t*)buffer + n, nbytes - n);
         n += i;
     } while (i != -1 && n != nbytes);
     
@@ -79,17 +67,22 @@ int File_Descriptor::nonblocking_read(void* buffer, size_t nbytes, uint32_t& rea
             return n + 1;
         }
         else
-            handle_error();
+        {
+            perror("File_Descriptor: nonblocking_read: read");
+            return 0;
+        }
     }
     else
         return n;
 }
 
-int File_Descriptor::nonblocking_write(const void* buffer, size_t count, uint32_t& write_avail) 
+int File_Descriptor::nonblocking_write(const void* buffer, size_t count, bool& write_avail) 
 {
-    ssize_t n = 0, i;
+    if (!write_avail || count <= 0) return 0;
+    
+    ssize_t n = 0, i = 0;
     do {
-        i = write(_fd, (char*)buffer + n, count - n);
+        i = write(_fd, (uint8_t*)buffer + n, count - n);
         n += i;
     } while (i != -1 && n != count);
 
@@ -100,17 +93,13 @@ int File_Descriptor::nonblocking_write(const void* buffer, size_t count, uint32_
             return n + 1;
         }
         else
-            handle_error();
+        {
+            perror("File_Descriptor: nonblocking_write: write");
+            return 0;
+        }
     }
     else
         return n;
-}
-
-int File_Descriptor::handle_error() const
-{
-    std::cerr << "Error on file descriptor (" << _fd << "): " << strerror(errno) << std::endl;
-    perror("File_Descriptor operation failed");
-    return -1;
 }
 
 
@@ -118,4 +107,16 @@ File_Descriptor::~File_Descriptor()
 {
     if (_fd != -1)
         close(_fd);
+}
+
+
+
+
+Timer_File_Descriptor::Timer_File_Descriptor(int clockid, int flags)
+    : File_Descriptor(timerfd_create(clockid, flags)) {}
+
+
+int Timer_File_Descriptor::settime(int flags, const struct itimerspec* new_value, struct itimerspec* old_value) const
+{
+    return timerfd_settime(this->get_fd(), flags, new_value, old_value);
 }

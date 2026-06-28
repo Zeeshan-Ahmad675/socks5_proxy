@@ -1,4 +1,5 @@
 #include "tcp.h"
+#include "fd_util.h"
 #include <iostream> // perror()
 #include <cstring> // memset()
 #include <cstdint> // uint8_t
@@ -125,12 +126,12 @@ int open_new_connection_to_target(SOCKS_Client& client)
     if ((n = getaddrinfo(name, service, &hints, &result)) != 0)
     {
         int err = errno;
-        std::cerr << "getaddrinfo: " << gai_strerror(n) << std::endl;
+        std::cerr << "tcp: open_new_connection_to_target: getaddrinfo: " << gai_strerror(n) << std::endl;
         switch (n){
             case EAI_SYSTEM:
                 if (err == ENETUNREACH)
                     return TCP_NETWORK_UNREACHABLE;
-                else freeaddrinfo_and_return(result, TCP_EAGAIN);
+                else freeaddrinfo_and_return(result, TCP_SERVER_ERROR);
             case EAI_ADDRFAMILY:
             case EAI_BADFLAGS:
             case EAI_FAMILY:    
@@ -153,13 +154,15 @@ int open_new_connection_to_target(SOCKS_Client& client)
     {
         if ((sockfd = socket(rp->ai_family, rp->ai_socktype | SOCK_NONBLOCK, rp->ai_protocol)) < 0)
         {
-            perror("socket");
+            perror("tcp: open_new_connection_to_target: socket");
             continue;
         }
 
         if (connect(sockfd, rp->ai_addr, rp->ai_addrlen) < 0)
         {
-            switch (errno) {
+            int err = errno;
+            perror("tcp: open_new_connection_to_target: connect");
+            switch (err) {
                 case EINPROGRESS:
                     client.target_host_fd = File_Descriptor(sockfd);
                     freeaddrinfo_and_return(result, TCP_INPROGRESS);
@@ -177,12 +180,9 @@ int open_new_connection_to_target(SOCKS_Client& client)
     
     if (rp == nullptr)
     {
-        std::cerr << "Failed to connect to remote application" << std::endl;
+        std::cerr << "tcp: open_new_connection_to_target: Failed to connect to remote application" << std::endl;
         freeaddrinfo_and_return(result, TCP_SERVER_ERROR);
     }
-    else
-        client.target_host_fd = File_Descriptor(sockfd);
-
     freeaddrinfo(result);
 
 
@@ -191,10 +191,40 @@ int open_new_connection_to_target(SOCKS_Client& client)
     addrlen = sizeof(bind_addr);
     if (getsockname(client.target_host_fd.get_fd(), &bind_addr, &addrlen) == -1)
     {
-        perror("SOCKS_Client: EVALUATION_AND_REPLY: getsockname");
+        perror("tcp: open_new_connection_to_target: getsockname");
         return TCP_SERVER_ERROR;
     }
 
-    client.set_bind_address_and_port(&bind_addr, addrlen);
+    if(!client.set_bind_address_and_port(&bind_addr, addrlen))
+        return TCP_SERVER_ERROR;
+    
+    client.target_host_fd = File_Descriptor(sockfd);    // what happens to the previous fd object when we do this?
     return TCP_SUCCESS;
+}
+
+
+int check_inprogress_connection(const File_Descriptor& fd)
+{
+    if (fd == -1) return TCP_SERVER_ERROR;
+    
+    int n;
+    uint32_t size = sizeof(n);
+    if (getsockopt(fd.get_fd(), SOL_SOCKET, SO_ERROR, &n, &size) == -1)
+    {
+        perror("SOCKS_Client: check_target_connection: getsockopt");
+        return TCP_SERVER_ERROR;
+    }
+
+    if (n == 0) return TCP_SUCCESS;
+    else
+    {
+        switch (errno) {
+            case ENETUNREACH:
+                return TCP_NETWORK_UNREACHABLE;
+            case ECONNREFUSED:
+                return TCP_CONNECTION_REFUSED;
+            default:
+                return TCP_SERVER_ERROR;
+        }
+    }
 }

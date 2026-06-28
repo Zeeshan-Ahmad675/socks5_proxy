@@ -1,9 +1,11 @@
 #ifndef FD_UTIL_H
 #define FD_UTIL_H
 
-#include <cstdint>
-#include <sys/types.h>
+#include <sys/timerfd.h> // timerfd_create()
+#include <cstddef> // size_t
 
+
+class SOCKS_Client;
 
 class File_Descriptor 
 {
@@ -20,19 +22,22 @@ public:
 
     int get_status_flags() const;
     int add_status_flags(int flags) const;
-    int nonblocking_read(void* buffer, size_t nbytes, uint32_t& read_avail);
-    int nonblocking_write(const void* buffer, size_t count, uint32_t& write_avail);
-
-    int handle_error() const;
+    int nonblocking_read(void* buffer, size_t nbytes, bool& read_avail);
+    int nonblocking_write(const void* buffer, size_t count, bool& write_avail);
 
     ~File_Descriptor();
 };
 
-class Timer_File_Descriptor
+
+class Timer_File_Descriptor: public File_Descriptor
 {
-private:
-    int _timer_fd;
-    File_Descriptor* associated_fd;
+public:
+    Timer_File_Descriptor() = delete;
+    explicit Timer_File_Descriptor(int clockid, int flags);
+
+    int settime(int flags, const struct itimerspec* new_value, struct itimerspec* old_value) const;
+
+    ~Timer_File_Descriptor() {}
 };
 
 

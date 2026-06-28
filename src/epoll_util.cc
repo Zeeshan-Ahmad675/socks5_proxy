@@ -1,4 +1,5 @@
 #include "epoll_util.h" 
+#include "socks.h"
 #include <systemd/sd-daemon.h>  // sd_is_socket()
 #include <cstdlib> // exit()
 #include <fcntl.h> // O_NONBLOCK
@@ -89,7 +90,13 @@ int Epoll_Instance::nonblocking_socks_client_accept(File_Descriptor& listener)
         if (i == -1 && (errno == EWOULDBLOCK || errno == EAGAIN)) break;
         
         SOCKS_Client* client = new SOCKS_Client(i, O_NONBLOCK, addr, addrlen);
-        if (add_to_interest(client->get_file_descriptor(), SOCKS_CLIENT_REF, client, EPOLLIN | EPOLLOUT | EPOLLET) != 0) {
+        if (client->err == S5E_FATAL)
+        {
+            delete client;
+            continue;
+        }
+        
+        if (add_to_interest(client->get_file_descriptor(), SOCKS_CLIENT_REF, client, EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLET) != 0) {
             std::cerr << "Unable to add client to epoll interest list. Closing connection" << std::endl;
             delete client;
         }

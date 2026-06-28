@@ -16,4 +16,6 @@
 File_Descriptor start_tcp_server(const char* port, int max_queued);
 int open_new_connection_to_target(SOCKS_Client& client);
 
+int check_inprogress_connection(const File_Descriptor& fd);
+
 #endif
