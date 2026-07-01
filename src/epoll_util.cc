@@ -27,28 +27,27 @@ Epoll_Instance::Epoll_Instance(int max_events)
 int Epoll_Instance::add_to_interest(const File_Descriptor& fd, epoll_event_data_type ev_dtype, void* ev_daddr, uint32_t events_and_flags)
 {
     // Stack allocation, so should be an error due to this
-    struct epoll_event_data ep_edata;
-    ep_edata.type = ev_dtype;
-    ep_edata.ptr = ev_daddr;
+    struct epoll_event_data* ep_edata = new epoll_event_data();
+    ep_edata->type = ev_dtype;
+    ep_edata->ptr = ev_daddr;
+
+    active_map[ep_edata] = false;
 
     _ev.events = events_and_flags;
     _ev.data.ptr = &ep_edata;
 
     if (epoll_ctl(_epollfd.get_fd(), EPOLL_CTL_ADD, fd.get_fd(), &_ev) == -1)
         handle_error();
-    else 
+    else
         return 0;
 }
 
-int Epoll_Instance::modify_event(const File_Descriptor& fd, epoll_event_data_type ev_dtype, void* ev_daddr, uint32_t events_and_flags)
+int Epoll_Instance::modify_event(const File_Descriptor& fd, epoll_event_data* new_ep_edata, uint32_t new_events_and_flags)
 {
-    // Stack allocation, so should be an error due to this
-    struct epoll_event_data ep_edata;
-    ep_edata.type = ev_dtype;
-    ep_edata.ptr = ev_daddr;
+    _ev.events = new_events_and_flags;
+    _ev.data.ptr = new_ep_edata;
 
-    _ev.events = events_and_flags;
-    _ev.data.ptr = &ep_edata;
+    active_map[new_ep_edata] = false;
 
     if (epoll_ctl(_epollfd.get_fd(), EPOLL_CTL_MOD, fd.get_fd(), &_ev) == -1)
         handle_error();
@@ -63,6 +62,12 @@ int Epoll_Instance::remove_from_interest(const File_Descriptor& fd) const
     else
         return 0;
 }
+
+
+
+
+
+
 
 
 
@@ -90,7 +95,7 @@ int Epoll_Instance::nonblocking_socks_client_accept(File_Descriptor& listener)
         if (i == -1 && (errno == EWOULDBLOCK || errno == EAGAIN)) break;
         
         SOCKS_Client* client = new SOCKS_Client(i, O_NONBLOCK, addr, addrlen);
-        if (client->err == S5E_FATAL)
+        if (client->cevents & S5E_FATAL)
         {
             delete client;
             continue;

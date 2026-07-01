@@ -1,12 +1,16 @@
+#undef _GNU_SOURCE
+#define _GNU_SOURCE
+// #define _FILE_OFFSET_BITS 64 // Needed??
+
 #include "fd_util.h"
-#include <fcntl.h>  // fcntl()
+#include <fcntl.h>  // O_* flags, fcntl(), splice()
 #include <sys/timerfd.h>
-#include <unistd.h> // read()
-#include <sys/socket.h> // accept()
+#include <unistd.h> // read(), pipe()
 #include <errno.h>  // errno
-#include <ctime>
-#include <cstring> // strerror()
-#include <cstdint> //uint8_t
+#include <cstring> //  strerror()
+#include <cstdint> // SIZE_MAX, uint8_t
+#include <sys/types.h> // ssize_t
+#include <climits> // SSIZE_MAX
 #include <iostream> // perror(), cerr
 
 File_Descriptor::File_Descriptor()
@@ -50,56 +54,38 @@ int File_Descriptor::add_status_flags(int flags) const
         return 0;
 }
 
-int File_Descriptor::nonblocking_read(void* buffer, size_t nbytes, bool& read_avail)
+int File_Descriptor::nonblocking_read(void* buffer, size_t nbytes)
 {
-    if (!read_avail || nbytes <= 0) return 0;
+    if (nbytes <= 0) return 0;
 
-    ssize_t n = 0, i = 0;
-    do {
-        i = read(_fd, (uint8_t*)buffer + n, nbytes - n);
-        n += i;
-    } while (i != -1 && n != nbytes);
+    _bytes_last_read = 0;
+    ssize_t i = 0;
+    while(i != -1 && _bytes_last_read != nbytes) 
+    {
+        _bytes_last_read += i;
+        i = read(_fd, (uint8_t*)buffer + _bytes_last_write, nbytes - _bytes_last_read);
+    } 
     
-    if (i == -1){
-        if (errno == EWOULDBLOCK || errno == EAGAIN)
-        {
-            read_avail = 0;
-            return n + 1;
-        }
-        else
-        {
-            perror("File_Descriptor: nonblocking_read: read");
-            return 0;
-        }
-    }
-    else
-        return n;
+    if (i == -1)
+        return errno;
+    return 0;
 }
 
-int File_Descriptor::nonblocking_write(const void* buffer, size_t count, bool& write_avail) 
+int File_Descriptor::nonblocking_write(const void* buffer, size_t count) 
 {
-    if (!write_avail || count <= 0) return 0;
+    if (count <= 0) return 0;
     
-    ssize_t n = 0, i = 0;
-    do {
-        i = write(_fd, (uint8_t*)buffer + n, count - n);
-        n += i;
-    } while (i != -1 && n != count);
-
-    if (i == -1) {
-        if (errno == EWOULDBLOCK || errno == EAGAIN)
-        {
-            write_avail = 0;
-            return n + 1;
-        }
-        else
-        {
-            perror("File_Descriptor: nonblocking_write: write");
-            return 0;
-        }
+    _bytes_last_write = 0;
+    ssize_t i = 0;
+    while (i != -1 && _bytes_last_write != count)
+    {
+        _bytes_last_write += i;
+        i = write(_fd, (uint8_t*)buffer + _bytes_last_write, count - _bytes_last_write);
     }
-    else
-        return n;
+
+    if (i == -1) 
+        return errno;
+    return 0;
 }
 
 
@@ -119,4 +105,59 @@ Timer_File_Descriptor::Timer_File_Descriptor(int clockid, int flags)
 int Timer_File_Descriptor::settime(int flags, const struct itimerspec* new_value, struct itimerspec* old_value) const
 {
     return timerfd_settime(this->get_fd(), flags, new_value, old_value);
+}
+
+
+
+
+
+Pipe::Pipe() : fatal_err(false)
+{
+    int pipefd[2];
+    if (pipe2(pipefd, O_NONBLOCK) == -1)
+    {
+        switch(errno) {
+            case EFAULT:
+            case EINVAL:
+                fatal_err = true;
+        }
+        perror("Pipe: Pipe(): pipe2");
+        _readfd = File_Descriptor();
+        _writefd = File_Descriptor();
+    }
+    else
+    {
+        _readfd = File_Descriptor(pipefd[0]);
+        _writefd = File_Descriptor(pipefd[1]);
+    }
+}
+
+int Pipe::nonblocking_read_from(File_Descriptor& fd)
+{
+    fd._bytes_last_write = 0;
+    ssize_t i = 0;
+    while(i != -1 || i != 0)
+    {
+        fd._bytes_last_write += i;
+        i += splice(fd.get_fd(), NULL, _writefd.get_fd(), NULL, SIZE_MAX / 2, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+    }
+    _writefd._bytes_last_read = fd._bytes_last_write;
+    if (i == -1)
+        return errno;
+    return 0;
+}
+
+int Pipe::nonblocking_write_to(File_Descriptor& fd, const unsigned int flags)
+{
+    fd._bytes_last_read = 0;
+    ssize_t i = 0;
+    while(i != -1)
+    {
+        fd._bytes_last_read += i;
+        i += splice(_readfd.get_fd(), NULL, fd.get_fd(), NULL, SIZE_MAX / 2, flags | SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+    }
+    _readfd._bytes_last_write = fd._bytes_last_read;
+    if (i == -1)
+        return errno;
+    return 0;
 }

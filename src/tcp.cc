@@ -164,7 +164,7 @@ int open_new_connection_to_target(SOCKS_Client& client)
             perror("tcp: open_new_connection_to_target: connect");
             switch (err) {
                 case EINPROGRESS:
-                    client.target_host_fd = File_Descriptor(sockfd);
+                    client.target_host_fd = new File_Descriptor(sockfd);
                     freeaddrinfo_and_return(result, TCP_INPROGRESS);
                 case ENETUNREACH:
                     freeaddrinfo_and_return(result, TCP_NETWORK_UNREACHABLE);
@@ -189,7 +189,7 @@ int open_new_connection_to_target(SOCKS_Client& client)
     sockaddr bind_addr;
     socklen_t addrlen;
     addrlen = sizeof(bind_addr);
-    if (getsockname(client.target_host_fd.get_fd(), &bind_addr, &addrlen) == -1)
+    if (getsockname(client.target_host_fd->get_fd(), &bind_addr, &addrlen) == -1)
     {
         perror("tcp: open_new_connection_to_target: getsockname");
         return TCP_SERVER_ERROR;
@@ -198,18 +198,19 @@ int open_new_connection_to_target(SOCKS_Client& client)
     if(!client.set_bind_address_and_port(&bind_addr, addrlen))
         return TCP_SERVER_ERROR;
     
-    client.target_host_fd = File_Descriptor(sockfd);    // what happens to the previous fd object when we do this?
+    client.target_host_fd = new File_Descriptor(sockfd);    // what happens to the previous fd object when we do this?
     return TCP_SUCCESS;
 }
 
 
-int check_inprogress_connection(const File_Descriptor& fd)
+int check_inprogress_connection(const File_Descriptor* fd)
 {
-    if (fd == -1) return TCP_SERVER_ERROR;
+    if (fd == nullptr) return TCP_SERVER_ERROR;
+    if (*fd == -1) return TCP_SERVER_ERROR;
     
     int n;
     uint32_t size = sizeof(n);
-    if (getsockopt(fd.get_fd(), SOL_SOCKET, SO_ERROR, &n, &size) == -1)
+    if (getsockopt(fd->get_fd(), SOL_SOCKET, SO_ERROR, &n, &size) == -1)
     {
         perror("SOCKS_Client: check_target_connection: getsockopt");
         return TCP_SERVER_ERROR;

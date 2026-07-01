@@ -1,95 +1,140 @@
 // Based on RFC 1928 (SOCKS Protocol Version 5)
 
-
-
-// Should be some method through which we can remove the overhead of re-evaluatint the same code in case of S5_EAGAIN.
+// Should be some method through which we can remove the overhead of re-evaluating the same code in case of S5_EAGAIN
+#undef _GNU_SOURCE
+#define _GNU_SOURCE
 
 #include "socks.h"
 #include "tcp.h"
-#include <sys/epoll.h> // EPOLLET, EPOLLOUT
+#include <sys/epoll.h> // EPOLL* events and flags
 #include <netinet/in.h> // ntohs()
-#include <cstring>  // memset()
+#include <unistd.h> // pipe()
+#include <fcntl.h> // O_* flags, splice()
+#include <cstring>  // memset(), strerror()
 #include <iostream> // cerr
 
-#define SOCKS_READ(pre_read, to_read, read_avail) \
+
+
+#define c_read_avail (cevents & S5E_IN)
+#define c_write_avail (cevents & S5E_OUT)
+#define h_read_avail (hevents & S5E_IN)
+#define h_write_avail (hevents & S5E_OUT)
+
+
+#define SOCKS_READ(pre_read, to_read) \
     do { \
-        SOCKS_Returns read_ret = abstracted_read(pre_read, to_read, read_avail); \
+        SOCKS_Returns read_ret = abstracted_read(pre_read, to_read); \
         if (read_ret == S5_SUCCESS); \
         else \
             return read_ret; \
     } while(0)
 
-#define SOCKS_WRITE(set_init_buf, init_count, count, write_avail, close) \
+#define SOCKS_WRITE(set_init_buf, init_count, count, close) \
     do { \
-        SOCKS_Returns write_ret = abstracted_write(set_init_buf, init_count, count, write_avail, close); \
+        SOCKS_Returns write_ret = abstracted_write(set_init_buf, init_count, count, close); \
         if (write_ret == S5_SUCCESS); \
         else \
             return write_ret; \
     } while(0)
 
 
-const SOCKS_Returns SOCKS_Client::abstracted_read(size_t pre_read, size_t to_read, bool& read_avail)
+const SOCKS_Returns SOCKS_Client::abstracted_read(size_t pre_read, size_t to_read)
 {
-    if (_buff_ptr_in >= pre_read && read_avail)
+    if (_buff_ptr_in >= pre_read)
     {
-        ssize_t nbytes;
+        int err;
         uint8_t* local_buff = new uint8_t[1024];
-        nbytes = _fd.nonblocking_read(local_buff, pre_read + to_read - _buff_ptr_in, read_avail);
-        // Needs to handle the invalid nbytes returned when an errors occurs
+        err = _fd.nonblocking_read(local_buff, pre_read + to_read - _buff_ptr_in);
 
-        memcpy(_buffer + _buff_ptr_in, local_buff, nbytes);
-        _buff_ptr_in += nbytes;
+        memcpy(_buffer + _buff_ptr_in, local_buff, _fd.get_last_read());
+        _buff_ptr_in += _fd.get_last_read();
         delete[] local_buff;
-    }
 
-    if (_buff_ptr_in != pre_read + to_read)
-    {
-        _repeat_state = _state;
-        err |= S5E_RDAGAIN;
-        return S5_RDAGAIN;
+        switch (err) {
+            case 0:
+                break;
+            case EAGAIN:    // Same value as EWOULDBLOCK on Linux only, so not portable
+                _repeat_state = _state;
+                cevents |= S5E_RDNEED;
+                cevents &= ~S5E_IN;
+                return S5_EAGAIN;
+            default:
+                std::cout << strerror(err) << std::endl;
+                _state = CLOSED;
+                return S5_CONNECTION_CLOSED; 
+        }
     }
-    if (err & S5E_RDHUP)
+    if (cevents & S5E_RDHUP)
     {
         _state = CLOSED;
         return S5_CONNECTION_CLOSED;
     }
-    err &= ~S5E_RDAGAIN;
+    cevents &= ~S5E_RDNEED;
     return S5_SUCCESS;
 }
 
 
-const SOCKS_Returns SOCKS_Client::abstracted_write(const uint8_t* set_init_buf, int init_count, size_t count, bool& write_avail, bool close)
+const SOCKS_Returns SOCKS_Client::abstracted_write(const uint8_t* set_init_buf, int init_count, size_t count, bool close)
 {
-    if (err & S5E_WRHUP)
+    if (cevents & S5E_WRHUP)
     {
         _state = CLOSED;
         return S5_CONNECTION_CLOSED;
     }
-    
-    ssize_t nbytes;
-    if (_buff_ptr_out < init_count && write_avail)
+
+    int err;
+    if (_buff_ptr_out < init_count)
     {
-        nbytes = _fd.nonblocking_write(set_init_buf + _buff_ptr_out, init_count - _buff_ptr_out, write_avail);
-        _buff_ptr_out += nbytes;
+        err = _fd.nonblocking_write(set_init_buf + _buff_ptr_out, init_count - _buff_ptr_out);
+        _buff_ptr_out += _fd.get_last_write();
+
+        switch (err) {
+            case 0:
+                break;
+            case EAGAIN:     // Same value as EWOULDBLOCK in Linux only, so not portable
+                cevents |= S5E_WRNEED;
+                cevents &= ~S5E_OUT;
+                _repeat_state = _state;
+                return S5_EAGAIN;
+            case EDQUOT:
+            case ENOSPC:
+                std::cout << strerror(err) << std::endl;
+                cevents |= S5E_WRNEED;
+                _repeat_state = _state;
+                return S5_WRAGAIN;
+            default:
+                std::cout << strerror(err) << std::endl;
+                _state = CLOSED;
+                return S5_CONNECTION_CLOSED; 
+        }
     }
-    if (_buff_ptr_out >= init_count && write_avail)
+    if (_buff_ptr_out >= init_count)
     {
         uint8_t* local_buff = new uint8_t[1024];
         memcpy(local_buff, _buffer + _buff_ptr_out, count - _buff_ptr_out);
-        nbytes = _fd.nonblocking_write(local_buff, count - _buff_ptr_out, write_avail);
-        _buff_ptr_out += nbytes;
-        // Needs to handle the invalid nbytes returned when an errors occurs
-
+        err = _fd.nonblocking_write(local_buff, count - _buff_ptr_out);
+        _buff_ptr_out += _fd.get_last_write();
         delete[] local_buff;
-    }
 
-    if (_buff_ptr_out != count)
-    {
-        err |= S5E_WRAGAIN;
-        _repeat_state = _state;
-        if (close)
-            return S5_REMOVE_EPOLLIN; // If this returns in case of close, then how would we make sure the connection is closed within 10 seconds as required
-        return S5_WRAGAIN;
+        switch (err) {
+            case 0:
+                break;
+            case EAGAIN:
+                cevents |= S5E_WRNEED;
+                cevents &= ~S5E_OUT;
+                _repeat_state = _state;
+                return S5_EAGAIN;
+            case EDQUOT:
+            case ENOSPC:
+                std::cout << strerror(err) << std::endl;
+                cevents |= S5E_WRNEED;
+                _repeat_state = _state;
+                return S5_WRAGAIN;
+            default:
+                std::cout << strerror(err) << std::endl;
+                _state = CLOSED;
+                return S5_CONNECTION_CLOSED; 
+        }
     }
     _buff_ptr_out = 0;
     if (close) 
@@ -97,19 +142,37 @@ const SOCKS_Returns SOCKS_Client::abstracted_write(const uint8_t* set_init_buf, 
         _state = CLOSED;
         return S5_CONNECTION_CLOSED;
     }
-    err &= ~S5E_WRAGAIN;
+    cevents &= ~S5E_WRNEED;
     return S5_SUCCESS;
 }
 
 
+SOCKS_Returns SOCKS_Client::setup_communication()
+{
+    _cpipe = new Pipe();
+    _hpipe = new Pipe();
+    if (!_cpipe->valid() || !_hpipe->valid())
+    {
+        SOCKS_Returns ret;
+        if (_cpipe->fatal_err || _hpipe->fatal_err){
+            _error = TCP_SERVER_ERROR;
+            cevents |= S5E_WRNEED;
+        }
+        delete _cpipe;
+        _cpipe = nullptr;
+        delete _hpipe;
+        _hpipe = nullptr;
+        return S5_WRAGAIN;
+    }
+    return S5_SUCCESS;
+}
 
 
-
-SOCKS_Client::SOCKS_Client(int fd, int flags, sockaddr addr, socklen_t addrlen) : _state (INITIAL), _repeat_state(NONE), _buff_ptr_in (0), _buff_ptr_out (0), _network_addr(addr), _addrlen(addrlen), _fd(fd), _error(0),_connected_to_target(false), target_host_fd(-1), timer(nullptr), notable_events(0), err(0)
+SOCKS_Client::SOCKS_Client(int fd, int flags, sockaddr addr, socklen_t addrlen) : _state (INITIAL), _repeat_state(NONE), _buff_ptr_in (0), _buff_ptr_out (0), _network_addr(addr), _addrlen(addrlen), _fd(fd), _cpipe(nullptr), _hpipe(nullptr), _error(0), _connected_to_target(false), target_host_fd(nullptr), timer(nullptr), cevents(0), hevents(0)
 {
     memset(_buffer, 0, sizeof(_buffer));
     if (_fd.add_status_flags(flags) == -1)
-        err = S5E_FATAL;
+        cevents |= S5E_FATAL;
 }
 
 const uint8_t* SOCKS_Client::get_target_host_address_and_port() const
@@ -167,42 +230,55 @@ bool SOCKS_Client::set_bind_address_and_port(const sockaddr* bind_addr, const so
     else return false;
 }
 
-const SOCKS_Returns SOCKS_Client::handle_request(const uint32_t events) {
+void SOCKS_Client::register_events(const uint32_t events, bool client)
+{
+    if (client)
+    {
+        if (events & EPOLLIN) cevents |= S5E_IN;
+        if (events & EPOLLOUT) cevents |= S5E_OUT;
+        if (events & EPOLLRDHUP) cevents |= S5E_RDHUP;
+        if (events & EPOLLERR) cevents |= S5E_WRHUP;
+        if (events & EPOLLHUP) cevents |= (S5E_RDHUP | S5E_WRHUP);
+    }
+    else
+    {
+        if (events & EPOLLIN) hevents |= S5E_IN;
+        if (events & EPOLLOUT) hevents |= S5E_OUT;
+        if (events & EPOLLRDHUP) hevents |= S5E_RDHUP;
+        if (events & EPOLLERR) hevents |= S5E_WRHUP;
+        if (events & EPOLLHUP) hevents |= (S5E_RDHUP | S5E_WRHUP);
+    }
+}
+
+const SOCKS_Returns SOCKS_Client::handle_request() {
     if (_state == CLOSED)
         return S5_CONNECTION_CLOSED;
-
-    bool read_avail = events & EPOLLIN;
-    bool write_avail = events & EPOLLOUT;
-    if (!read_avail && !write_avail) return S5_BAD_REQUEST;
+    if (!c_read_avail || !c_write_avail) return S5_BAD_REQUEST;
 
     if (_error != 0)
     {
         uint8_t init_buff[4] = { 0x05, _error,  0x00, 0x01};
-        SOCKS_WRITE(init_buff, 4, 10, write_avail, true);
+        SOCKS_WRITE(init_buff, 4, 10, true);
     }
-
-    ssize_t nbytes;
-    size_t to_read;
-
     // What would happen when the state machine doens't need EPOLLIN right now rather EPOLLOUT but EPOLLIN is available, then how to delegate it or vice versa
 
     if (_state == INITIAL)
     {
         if (_buff_ptr_in < 2)
-            SOCKS_READ(0, 2, read_avail);
+            SOCKS_READ(0, 2);
         if (_buff_ptr_in == 2) 
         {
             if (_buffer[0] != 0x05)
             {
                 std::cerr << "SOCKS_Client: INITIAL: Unsupported version" << std::endl;
                 uint8_t init_buff[2] = { 0x05, 0xFF };
-                SOCKS_WRITE(init_buff, 2, 2, write_avail, true);
+                SOCKS_WRITE(init_buff, 2, 2, true);
             }
         }
         if (_buff_ptr_in > 2 && _buff_ptr_in < 2 + _buffer[1])
-            SOCKS_READ(2, _buffer[1], read_avail);
+            SOCKS_READ(2, _buffer[1]);
     }
-    if (write_avail && _buff_ptr_in == 2 + _buffer[1])
+    if (_buff_ptr_in == 2 + _buffer[1])
     {
         int i;
         for(i = 2; i < 2 + _buffer[1]; i++)
@@ -228,10 +304,10 @@ const SOCKS_Returns SOCKS_Client::handle_request(const uint32_t events) {
         {
             std::cerr << "SOCKS_Client: INITIAL: No supported authentication method" << std::endl;
             uint8_t init_buff[2] = { 0x05, 0xFF };
-            SOCKS_WRITE(init_buff, 2, 2, write_avail, true);
+            SOCKS_WRITE(init_buff, 2, 2, true);
         }
 
-        SOCKS_WRITE(nullptr, 0, 2, write_avail, false);
+        SOCKS_WRITE(nullptr, 0, 2, false);
         _state = AUTHENTICATION;
     }
     
@@ -247,46 +323,46 @@ const SOCKS_Returns SOCKS_Client::handle_request(const uint32_t events) {
         _buff_ptr_in = 0; // Just for now. if we can find a better way later, remove it
 
         if (_buff_ptr_in < 4)
-            SOCKS_READ(0, 4, read_avail);
+            SOCKS_READ(0, 4);
         if (_buff_ptr_in == 4) {
             if (_buffer[0] != 0x05)
             {
                 std::cerr << "SOCKS_Client: REQUESTS: Unsupported version" << std::endl;
                 uint8_t init_buff[4] = { 0x05, 0x02, 0x00, 0x01 }; // connection not allowed by ruleset
-                SOCKS_WRITE(init_buff, 4, 10, write_avail, true);
+                SOCKS_WRITE(init_buff, 4, 10, true);
             }
             if (_buffer[1] != 0x01 && _buffer[1] != 0x02 && _buffer[1] != 0x03)
             {
                 std::cerr << "SOCKS_Client: REQUESTS: Unknown command" << std::endl;
                 uint8_t init_buff[4] = { 0x05, 0x07, 0x00, 0x01 }; // Command not supported
-                SOCKS_WRITE(init_buff, 4, 10, write_avail, true);
+                SOCKS_WRITE(init_buff, 4, 10, true);
             }
             if (_buffer[2] != 0x00)
             {
                 std::cerr << "SOCKS_Client: REQUESTS: Reserved byte used" << std::endl;
                 uint8_t init_buff[4] = { 0x05, 0x02, 0x00, 0x01 }; // connection not allowed by ruleset
-                SOCKS_WRITE(init_buff, 4, 10, write_avail, true);
+                SOCKS_WRITE(init_buff, 4, 10, true);
             }
             if (_buffer[3] != 0x01 || _buffer[3] != 0x03 || _buffer[3] != 0x04)
             {
                 std::cerr << "SOCKS_Client: REQUESTS: Unknown Address type" << std::endl;
                 uint8_t init_buff[4] = { 0x05, 0x08, 0x00, 0x01 }; // Address type not supported
-                SOCKS_WRITE(init_buff, 4, 10, write_avail, true);
+                SOCKS_WRITE(init_buff, 4, 10, true);
             }
         }
         if (_buff_ptr_in >= 4)
         {
             if (_buffer[3] == 0x01)
-                SOCKS_READ(4, 6, read_avail);
+                SOCKS_READ(4, 6);
             else if (_buffer[3] == 0x03)
             {
                 if (_buff_ptr_in == 4)
-                    SOCKS_READ(4, 1, read_avail);
+                    SOCKS_READ(4, 1);
                 if (_buff_ptr_in >= 5)
-                    SOCKS_READ(5, _buffer[4] + 2, read_avail);
+                    SOCKS_READ(5, _buffer[4] + 2);
             }
             else 
-                SOCKS_READ(4, 18, read_avail);
+                SOCKS_READ(4, 18);
             _state = EVALUATION_AND_REPLY;
         }
     }
@@ -301,40 +377,141 @@ const SOCKS_Returns SOCKS_Client::handle_request(const uint32_t events) {
 
         switch (_buffer[1]) {
             case TCP_INPROGRESS:
-                return S5_ADD_TARGET_CONNECT_TIMER;
+                return S5_ADD_TARGET_CONNECT_TIMER; // Shoudn't return a second time (maybe remove EPOLL on clientfd??)
             case TCP_SUCCESS:
+            {
+                SOCKS_Returns ret;
+                if ((ret = setup_communication()) == S5_SUCCESS);
+                else return ret;
+                SOCKS_WRITE(nullptr, 0, _buffer[3] == 0x01 ? 4 : 16, false);
                 _connected_to_target = true;
-                SOCKS_WRITE(nullptr, 0, _buffer[3] == 0x01 ? 4 : 16, write_avail, false);
                 _state = COMMUNICATION;
-                return S5_ADD_TARGET_TO_EPOLL;
+            }
             case TCP_EAGAIN:
                 return S5_EAGAIN;
             default:
-                SOCKS_WRITE(init_buff, 4, 10, write_avail, true);
+                SOCKS_WRITE(init_buff, 4, 10, true);
         }
     }
+    return S5_BAD_REQUEST;
+}
 
+const SOCKS_Returns SOCKS_Client::handle_communication(const bool with_client, const bool read)
+{
+    if (_state != COMMUNICATION) return S5_BAD_REQUEST;
 
-    if (_state == COMMUNICATION)
+    int err;
+    File_Descriptor& fd = (with_client) ? _fd : *target_host_fd;
+    Pipe& in = (with_client) ? *_cpipe : *_hpipe;
+    Pipe& out = (with_client) ? *_hpipe : *_cpipe;
+    uint8_t& ev = (with_client) ? cevents : hevents;
+    uint8_t& comp_ev = (with_client) ? hevents : cevents;
+
+    if (read){
+        if (ev & S5E_IN)
+        {
+            err = in.nonblocking_read_from(fd);
+            if (in.get_last_read() && !(comp_ev & S5E_WRHUP))
+                comp_ev |= S5E_WRNEED;
+
+            if (err != 0)
+            {
+                switch (err) {
+                    case EAGAIN:
+                        ev &= ~S5E_IN;
+                        return S5_SUCCESS;
+                    case EBADF:
+                    case EINVAL:
+                    case ESPIPE:
+                    default:
+                        std::cout << strerror(err) << std::endl;
+                        _state = CLOSED;
+                        return S5_CONNECTION_CLOSED;
+                    case ENOMEM:
+                        ev |= S5E_RDNEED;
+                        return S5_RDAGAIN;
+                }
+            }
+            else
+            {
+                if (ev & S5E_RDHUP)
+                {
+                    _state = CLOSED;
+                    return S5_CONNECTION_CLOSED;
+                }
+                ev |= S5E_RDNEED;
+                return S5_RDAGAIN;
+            }
+        }
+        else
+            return S5_BAD_REQUEST;
+    }
+    else
     {
-        
+        if (ev & S5E_OUT)
+        {
+            if (ev & S5E_WRHUP)
+            {
+                ev &= ~S5E_WRNEED;
+                _state = CLOSED;
+                return S5_CONNECTION_CLOSED;
+            }
+            int flag = ((ev & S5E_RDHUP) && !(ev & S5E_RDNEED)) ? 0 : SPLICE_F_MORE;
+            err = out.nonblocking_write_to(fd, flag);
+
+            if (err != 0)
+            {
+                switch (err) {
+                    case EAGAIN:
+                        ev &= (~S5E_OUT & ~S5E_WRNEED);
+                        return S5_SUCCESS;
+                    case EBADF:
+                    case EINVAL:
+                    case ESPIPE:
+                    default:
+                        std::cout << strerror(err) << std::endl;
+                        _state = CLOSED;
+                        return S5_CONNECTION_CLOSED;
+                    case ENOMEM:
+                        std::cout << strerror(err) << std::endl;
+                        ev |= S5E_WRNEED;
+                        return S5_WRAGAIN;
+                }
+            }
+            else // Virtually never used
+            {
+                ev |= S5E_WRNEED;
+                return S5_WRAGAIN;
+            }
+        }
+        else
+            return S5_BAD_REQUEST;
     }
 }
 
-
-const SOCKS_Returns SOCKS_Client::check_target_connection(bool using_var)
+const SOCKS_Returns SOCKS_Client::check_target_connection(const bool using_var)
 {
-    if (_state != EVALUATION_AND_REPLY && !using_var) return S5_BAD_REQUEST;
-
+    if (_state != EVALUATION_AND_REPLY && !using_var)
+    {
+        _error = TCP_SERVER_ERROR;
+        cevents |= S5E_WRNEED;
+        return S5_WRAGAIN;
+    }
     if (using_var){
         if (_connected_to_target) return S5_SUCCESS;
         _error = TCP_HOST_UNREACHABLE;
-        return S5_EAGAIN;
+        cevents |= S5E_WRNEED;
+        return S5_WRAGAIN;
     }
     else{
         if ((_error = check_inprogress_connection(target_host_fd)) != TCP_SUCCESS)
-            return S5_EAGAIN;
+        {
+            cevents |= S5E_WRNEED;
+            return S5_WRAGAIN;
+        }
+        _state = COMMUNICATION;
         _connected_to_target = true;
+        _buffer[1] = TCP_SUCCESS;
         return S5_SUCCESS;
     }
 }
@@ -342,6 +519,12 @@ const SOCKS_Returns SOCKS_Client::check_target_connection(bool using_var)
 
 SOCKS_Client::~SOCKS_Client()
 {
+    if (_cpipe != nullptr)
+        delete _cpipe;
+    if (_hpipe != nullptr)
+        delete _hpipe;
+    if (target_host_fd != nullptr)
+        delete target_host_fd;
     if (timer != nullptr)
         delete timer;
 }
