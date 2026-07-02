@@ -386,6 +386,7 @@ const SOCKS_Returns SOCKS_Client::handle_request() {
                 SOCKS_WRITE(nullptr, 0, _buffer[3] == 0x01 ? 4 : 16, false);
                 _connected_to_target = true;
                 _state = COMMUNICATION;
+                return S5_SUCCESS;
             }
             case TCP_EAGAIN:
                 return S5_EAGAIN;
@@ -407,6 +408,7 @@ const SOCKS_Returns SOCKS_Client::handle_communication(const bool with_client, c
     uint8_t& ev = (with_client) ? cevents : hevents;
     uint8_t& comp_ev = (with_client) ? hevents : cevents;
 
+    if (ev & S5E_CLOSED) return S5_CONNECTION_CLOSED;
     if (read){
         if (ev & S5E_IN)
         {
@@ -418,14 +420,14 @@ const SOCKS_Returns SOCKS_Client::handle_communication(const bool with_client, c
             {
                 switch (err) {
                     case EAGAIN:
-                        ev &= ~S5E_IN;
+                        ev &= (~S5E_IN & ~S5E_RDNEED);
                         return S5_SUCCESS;
                     case EBADF:
                     case EINVAL:
                     case ESPIPE:
                     default:
                         std::cout << strerror(err) << std::endl;
-                        _state = CLOSED;
+                        ev &= S5E_CLOSED;
                         return S5_CONNECTION_CLOSED;
                     case ENOMEM:
                         ev |= S5E_RDNEED;
@@ -434,13 +436,16 @@ const SOCKS_Returns SOCKS_Client::handle_communication(const bool with_client, c
             }
             else
             {
-                if (ev & S5E_RDHUP)
+                ev &= ~S5E_IN & ~S5E_RDNEED;
+                ev |= S5E_RDHUP;
+                if ((ev & S5E_WRHUP))
                 {
-                    _state = CLOSED;
+                    ev &= S5E_CLOSED;
                     return S5_CONNECTION_CLOSED;
                 }
-                ev |= S5E_RDNEED;
-                return S5_RDAGAIN;
+
+                ev |= S5E_WRNEED;
+                return S5_WRAGAIN;
             }
         }
         else
@@ -452,9 +457,14 @@ const SOCKS_Returns SOCKS_Client::handle_communication(const bool with_client, c
         {
             if (ev & S5E_WRHUP)
             {
-                ev &= ~S5E_WRNEED;
-                _state = CLOSED;
-                return S5_CONNECTION_CLOSED;
+                ev &= (~S5E_WRNEED & ~S5E_OUT);
+                if ((ev & S5E_RDHUP))
+                {
+                    ev &= S5E_CLOSED;
+                    return S5_CONNECTION_CLOSED;
+                }
+                ev |= S5E_RDNEED;
+                return S5_RDAGAIN;
             }
             int flag = ((ev & S5E_RDHUP) && !(ev & S5E_RDNEED)) ? 0 : SPLICE_F_MORE;
             err = out.nonblocking_write_to(fd, flag);
@@ -463,14 +473,15 @@ const SOCKS_Returns SOCKS_Client::handle_communication(const bool with_client, c
             {
                 switch (err) {
                     case EAGAIN:
-                        ev &= (~S5E_OUT & ~S5E_WRNEED);
-                        return S5_SUCCESS;
+                        ev |= S5E_WRNEED;
+                        ev &= ~S5E_OUT;
+                        break; // same returning value as of case when err=0 since that represents there is nothing in the pipe to write
                     case EBADF:
                     case EINVAL:
                     case ESPIPE:
                     default:
                         std::cout << strerror(err) << std::endl;
-                        _state = CLOSED;
+                        ev &= S5E_CLOSED;
                         return S5_CONNECTION_CLOSED;
                     case ENOMEM:
                         std::cout << strerror(err) << std::endl;
@@ -478,11 +489,9 @@ const SOCKS_Returns SOCKS_Client::handle_communication(const bool with_client, c
                         return S5_WRAGAIN;
                 }
             }
-            else // Virtually never used
-            {
-                ev |= S5E_WRNEED;
-                return S5_WRAGAIN;
-            }
+            else 
+                ev &= ~S5E_WRNEED;
+            return S5_SUCCESS;
         }
         else
             return S5_BAD_REQUEST;

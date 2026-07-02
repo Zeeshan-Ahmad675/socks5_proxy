@@ -60,7 +60,7 @@ int File_Descriptor::nonblocking_read(void* buffer, size_t nbytes)
 
     _bytes_last_read = 0;
     ssize_t i = 0;
-    while(i != -1 && _bytes_last_read != nbytes) 
+    while(i != -1 && i != 0 && _bytes_last_read != nbytes) 
     {
         _bytes_last_read += i;
         i = read(_fd, (uint8_t*)buffer + _bytes_last_write, nbytes - _bytes_last_read);
@@ -139,7 +139,7 @@ int Pipe::nonblocking_read_from(File_Descriptor& fd)
     while(i != -1 || i != 0)
     {
         fd._bytes_last_write += i;
-        i += splice(fd.get_fd(), NULL, _writefd.get_fd(), NULL, SIZE_MAX / 2, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+        i = splice(fd.get_fd(), NULL, _writefd.get_fd(), NULL, SIZE_MAX / 2, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
     }
     _writefd._bytes_last_read = fd._bytes_last_write;
     if (i == -1)
@@ -151,10 +151,10 @@ int Pipe::nonblocking_write_to(File_Descriptor& fd, const unsigned int flags)
 {
     fd._bytes_last_read = 0;
     ssize_t i = 0;
-    while(i != -1)
+    while(i != -1 && i != 0)
     {
         fd._bytes_last_read += i;
-        i += splice(_readfd.get_fd(), NULL, fd.get_fd(), NULL, SIZE_MAX / 2, flags | SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+        i = splice(_readfd.get_fd(), NULL, fd.get_fd(), NULL, SIZE_MAX / 2, flags | SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
     }
     _readfd._bytes_last_write = fd._bytes_last_read;
     if (i == -1)

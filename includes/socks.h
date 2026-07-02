@@ -12,19 +12,21 @@ enum SOCKS_Events: uint8_t
     S5E_RDHUP = 2,          // We can't read after the next EAGAIN on read from this socket
     S5E_WRHUP = 4,          // We can't  write on this socket now
     S5E_RDNEED = 8,         // We haven't finished reading this time, so there is still some data to be read
+                            // In case of COMMUNICATION (pipe/splice), this also mean that there might be some data in the to be read from socket to pipe
     S5E_WRNEED = 16,        // We haven't finished writing this time, so there is still some data to be written
+                            // In case of COMMUNICATION (pipe/splice), this also mean that there might be some data in the pipe to be written to the socket
     S5E_IN = 32,            // There is some data available to be read
     S5E_OUT = 64,           // We can write to this socket
+    S5E_CLOSED = 128        // This socket is closed and is no longer valid to read or write
 };
 
 enum SOCKS_Returns: uint8_t
 {
     S5_SUCCESS = 129,               // Success in the task on hand
     S5_EAGAIN,                      // Wait for the event to get triggered AGAIN
-    S5_RDAGAIN,                     // We are just stuck due to internal memory (mostly) errors, try reading again
+    S5_RDAGAIN,                     // We are just stuck due to internal memory (mostly) errors, try reading again (other reasons also exist in COMMUNICATION state)
     S5_WRAGAIN,                     // We are just stuck due to internal memory (mostly) errors, try writing again
     S5_ADD_TARGET_CONNECT_TIMER,
-    S5_ADD_TARGET_TO_EPOLL,
     S5_CONNECTION_CLOSED,
     S5_BAD_REQUEST,
 };

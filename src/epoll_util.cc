@@ -1,9 +1,11 @@
 #include "epoll_util.h" 
+#include "fd_util.h"
 #include "socks.h"
 #include <systemd/sd-daemon.h>  // sd_is_socket()
 #include <cstdlib> // exit()
 #include <fcntl.h> // O_NONBLOCK
 #include <iostream> // perror()
+#include <errno.h> // errno
 
 
 Epoll_Instance::Epoll_Instance(int max_events)
@@ -18,10 +20,8 @@ Epoll_Instance::Epoll_Instance(int max_events)
         throw std::runtime_error("Epoll_Instance: max_events must be positive and nonzero");
 
     
-    if ((_epollfd = File_Descriptor(epoll_create1(0))) == -1) {
-        perror("epoll_create");
-        exit(EXIT_FAILURE);
-    }
+    if ((_epollfd = File_Descriptor(epoll_create1(0))) == -1)
+        perror("Epoll_Instance: epoll_create");
 }
 
 int Epoll_Instance::add_to_interest(const File_Descriptor& fd, epoll_event_data_type ev_dtype, void* ev_daddr, uint32_t events_and_flags)
@@ -37,7 +37,7 @@ int Epoll_Instance::add_to_interest(const File_Descriptor& fd, epoll_event_data_
     _ev.data.ptr = &ep_edata;
 
     if (epoll_ctl(_epollfd.get_fd(), EPOLL_CTL_ADD, fd.get_fd(), &_ev) == -1)
-        handle_error();
+        return errno;
     else
         return 0;
 }
@@ -50,7 +50,7 @@ int Epoll_Instance::modify_event(const File_Descriptor& fd, epoll_event_data* ne
     active_map[new_ep_edata] = false;
 
     if (epoll_ctl(_epollfd.get_fd(), EPOLL_CTL_MOD, fd.get_fd(), &_ev) == -1)
-        handle_error();
+        return errno;
     else 
         return 0;
 }
@@ -58,7 +58,7 @@ int Epoll_Instance::modify_event(const File_Descriptor& fd, epoll_event_data* ne
 int Epoll_Instance::remove_from_interest(const File_Descriptor& fd) const
 {
     if (epoll_ctl(_epollfd.get_fd(), EPOLL_CTL_DEL, fd.get_fd(), NULL) == -1)   // NULL here requires Linux 2.6.9 or higher
-        handle_error();
+        return errno;
     else
         return 0;
 }
@@ -75,8 +75,8 @@ int Epoll_Instance::get_events(int timeout)
 {
     int nfds;
     if ((nfds = epoll_wait(_epollfd.get_fd(), events_buff, _max_events, timeout)) == -1)
-        handle_error();
-    else 
+        return -1;
+    else
         return nfds;
 }
 
@@ -113,4 +113,10 @@ int Epoll_Instance::nonblocking_socks_client_accept(File_Descriptor& listener)
 Epoll_Instance::~Epoll_Instance()
 {
     delete[] events_buff;
+    for (std::unordered_map<epoll_event_data*, bool>::iterator i =  active_map.begin(); i != active_map.end(); i++)
+    {
+        if (i->second != FILE_DESCRIPTOR_REF)
+            delete (SOCKS_Client*)i->first->ptr;
+        delete i->first;
+    }
 }
