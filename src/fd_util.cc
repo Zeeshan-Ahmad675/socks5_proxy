@@ -6,10 +6,10 @@
 #include <fcntl.h>  // O_* flags, fcntl(), splice()
 #include <sys/timerfd.h>
 #include <unistd.h> // read(), pipe()
+#include <sys/types.h> // ssize_t
 #include <errno.h>  // errno
 #include <cstring> //  strerror()
 #include <cstdint> // SIZE_MAX, uint8_t
-#include <sys/types.h> // ssize_t
 #include <climits> // SSIZE_MAX
 #include <iostream> // perror(), cerr
 
@@ -17,17 +17,44 @@ File_Descriptor::File_Descriptor()
 : _fd (-1) {}
 
 File_Descriptor::File_Descriptor(int fd)
-: _fd (fd) {}
+: _fd (fd), _bytes_last_read(0), _bytes_last_write(0) {}
+
+File_Descriptor::File_Descriptor(File_Descriptor&& other) noexcept
+: _fd(other._fd), _bytes_last_read(other._bytes_last_read), _bytes_last_write(other._bytes_last_write)
+{
+    other._fd = -1;
+}
+
+File_Descriptor& File_Descriptor::operator=(File_Descriptor&& other) noexcept
+{
+    if (this != &other) {
+        if (_fd != -1)
+            close(_fd);
+        _fd = other._fd;
+        _bytes_last_read = other._bytes_last_read;
+        _bytes_last_write = other._bytes_last_write;
+        other._fd = -1;
+    }
+    return *this;
+}
 
 
 bool File_Descriptor::operator==(const File_Descriptor& other) const
 {
     return _fd == other.get_fd();
 }
-
 bool File_Descriptor::operator==(int other) const
 {
     return _fd == other;
+}
+
+bool File_Descriptor::operator!=(const File_Descriptor& other) const
+{
+    return _fd != other.get_fd();
+}
+bool File_Descriptor::operator!=(int other) const
+{
+    return _fd != other;
 }
 
 int File_Descriptor::get_status_flags() const 
@@ -60,10 +87,11 @@ int File_Descriptor::nonblocking_read(void* buffer, size_t nbytes)
 
     _bytes_last_read = 0;
     ssize_t i = 0;
-    while(i != -1 && i != 0 && _bytes_last_read != nbytes) 
+    while(i != -1 && _bytes_last_read != nbytes) 
     {
         _bytes_last_read += i;
-        i = read(_fd, (uint8_t*)buffer + _bytes_last_write, nbytes - _bytes_last_read);
+        i = read(_fd, (uint8_t*)buffer + _bytes_last_read, nbytes - _bytes_last_read);
+        if (i == 0) break;
     } 
     
     if (i == -1)
@@ -91,7 +119,7 @@ int File_Descriptor::nonblocking_write(const void* buffer, size_t count)
 
 File_Descriptor::~File_Descriptor()
 {
-    if (_fd != -1)
+    if (_fd >= 0)
         close(_fd);
 }
 
@@ -134,14 +162,15 @@ Pipe::Pipe() : fatal_err(false)
 
 int Pipe::nonblocking_read_from(File_Descriptor& fd)
 {
-    fd._bytes_last_write = 0;
+    _writefd._bytes_last_read = 0;
     ssize_t i = 0;
-    while(i != -1 || i != 0)
+    while(i != -1)
     {
-        fd._bytes_last_write += i;
+        _writefd._bytes_last_read += i;
         i = splice(fd.get_fd(), NULL, _writefd.get_fd(), NULL, SIZE_MAX / 2, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+        if (i == 0) break;
     }
-    _writefd._bytes_last_read = fd._bytes_last_write;
+    fd._bytes_last_read = _writefd._bytes_last_read;
     if (i == -1)
         return errno;
     return 0;
@@ -149,14 +178,15 @@ int Pipe::nonblocking_read_from(File_Descriptor& fd)
 
 int Pipe::nonblocking_write_to(File_Descriptor& fd, const unsigned int flags)
 {
-    fd._bytes_last_read = 0;
+    _readfd._bytes_last_write = 0;
     ssize_t i = 0;
-    while(i != -1 && i != 0)
+    while(i != -1)
     {
-        fd._bytes_last_read += i;
+        _readfd._bytes_last_write += i;
         i = splice(_readfd.get_fd(), NULL, fd.get_fd(), NULL, SIZE_MAX / 2, flags | SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+        if (i == 0) break;
     }
-    _readfd._bytes_last_write = fd._bytes_last_read;
+    fd._bytes_last_write = _readfd._bytes_last_write;
     if (i == -1)
         return errno;
     return 0;

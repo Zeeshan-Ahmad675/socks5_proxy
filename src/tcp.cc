@@ -24,7 +24,7 @@ File_Descriptor start_tcp_server (const char* port, int max_queued) {
 
 
     memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_UNSPEC;    // Allows IPv4 or IPv6 (although the documentation mentions all network families are possible, but in implementation only IP is used and other families became obsolete over time.)
+    hints.ai_family = AF_INET;    // Allows IPv4 or IPv6 (although the documentation mentions all network families are possible, but in implementation only IP is used and other families became obsolete over time.)
     hints.ai_socktype = SOCK_STREAM; // Byte Steam Socket
     hints.ai_flags = AI_PASSIVE; // Wildcard IP address
     hints.ai_protocol = IPPROTO_TCP; // TCP
@@ -73,7 +73,7 @@ File_Descriptor start_tcp_server (const char* port, int max_queued) {
     }
 
     freeaddrinfo(result);
-    std::cout << "Server bound to port " << port << std::endl;
+    // std::cout<< "Server bound to port " << port << std::endl;
     
     if (listen(sockfd, max_queued) < 0)
     {
@@ -91,29 +91,45 @@ int open_new_connection_to_target(SOCKS_Client& client)
     const uint8_t* target_addr_port = client.get_target_host_address_and_port();
     if (target_addr_port == nullptr) return TCP_SERVER_ERROR;
 
-    int sockfd, n;
+    int sockfd, n, ret = -1;
     struct addrinfo hints;
     struct addrinfo *result, *rp;
     char name[256] = { 0 }, service[3] = { 0 };
+    char port_str[6];  // enough for 0–65535 + null in char not as raw as we were doing before
 
     switch(target_addr_port[0]) {
-    case 0x01:
-        memcpy(name, target_addr_port + 1, 4);
-        memcpy(service, target_addr_port + 5, 2);
-        break;
+    case 0x01: 
+        {
+            struct in_addr addr;
+            memcpy(&addr, target_addr_port + 1, 4);
+            memcpy(service, target_addr_port + 5, 2);
+            inet_ntop(AF_INET, &addr, name, sizeof(name)); // this to make sure that the IP address is in dot notation as getaddrinfo expects not in 4 binary bytes 
+            break;
+        }
     case 0x03:
         memcpy(name, target_addr_port + 2, target_addr_port[1]);
         memcpy(service, target_addr_port + 2 + target_addr_port[1], 2);
         break;
     case 0x04:
-        memcpy(name, target_addr_port + 1, 16);
-        memcpy(service, target_addr_port + 17, 2);
-        break;
+        {
+            struct in6_addr addr;
+            memcpy(&addr, target_addr_port + 1, 16);
+            memcpy(service, target_addr_port + 17, 2);
+            inet_ntop(AF_INET6, &addr, name, sizeof(name));
+            break;
+        }
     default:
         delete[] target_addr_port;
         return TCP_ATYP_UNSUPPORTED;
     }
     delete[] target_addr_port;
+
+    uint16_t serv_short;
+    memcpy(&serv_short, service, 2);      // Copy raw network bytes
+    serv_short = ntohs(serv_short);       // Convert to host order ONCE
+    snprintf(port_str, sizeof(port_str), "%u", serv_short);
+
+    // std::cout<< name << std::endl;
 
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_UNSPEC;    // Allows IPv4 or IPv6 (although the documentation mentions all network families are possible, but in implementation only IP is used and other families became obsolete over time.)
@@ -123,29 +139,31 @@ int open_new_connection_to_target(SOCKS_Client& client)
     hints.ai_addr = NULL;
     hints.ai_next = NULL;
 
-    if ((n = getaddrinfo(name, service, &hints, &result)) != 0)
+    // printf("%s\n", port_str);
+    if ((n = getaddrinfo(name, port_str, &hints, &result)) != 0)
     {
         int err = errno;
+        // std::cout<< "errno: " << err  << " n: " << n << std::endl;
         std::cerr << "tcp: open_new_connection_to_target: getaddrinfo: " << gai_strerror(n) << std::endl;
         switch (n){
             case EAI_SYSTEM:
                 if (err == ENETUNREACH)
                     return TCP_NETWORK_UNREACHABLE;
-                else freeaddrinfo_and_return(result, TCP_SERVER_ERROR);
+                else return TCP_SERVER_ERROR;
             case EAI_ADDRFAMILY:
             case EAI_BADFLAGS:
             case EAI_FAMILY:    
             case EAI_MEMORY:
             case EAI_SOCKTYPE:
-                freeaddrinfo_and_return(result, TCP_SERVER_ERROR);
+                return TCP_SERVER_ERROR;
             case EAI_FAIL:
             case EAI_NODATA:
             case EAI_NONAME:
-                freeaddrinfo_and_return(result, TCP_HOST_UNREACHABLE);
+                return TCP_HOST_UNREACHABLE;
             case EAI_SERVICE:
-                freeaddrinfo_and_return(result, TCP_CONNECTION_REFUSED);
+                return TCP_CONNECTION_REFUSED;
             case EAI_AGAIN:
-                freeaddrinfo_and_return(result, TCP_EAGAIN);
+                return TCP_EAGAIN;
         }
     }
 
@@ -164,8 +182,8 @@ int open_new_connection_to_target(SOCKS_Client& client)
             perror("tcp: open_new_connection_to_target: connect");
             switch (err) {
                 case EINPROGRESS:
-                    client.target_host_fd = new File_Descriptor(sockfd);
-                    freeaddrinfo_and_return(result, TCP_INPROGRESS);
+                    ret = TCP_INPROGRESS;
+                    break;
                 case ENETUNREACH:
                     freeaddrinfo_and_return(result, TCP_NETWORK_UNREACHABLE);
                 case ECONNREFUSED:
@@ -184,6 +202,7 @@ int open_new_connection_to_target(SOCKS_Client& client)
         freeaddrinfo_and_return(result, TCP_SERVER_ERROR);
     }
     freeaddrinfo(result);
+    client.target_host_fd = new File_Descriptor(sockfd);    // what happens to the previous fd object when we do this?
 
 
     sockaddr bind_addr;
@@ -198,8 +217,10 @@ int open_new_connection_to_target(SOCKS_Client& client)
     if(!client.set_bind_address_and_port(&bind_addr, addrlen))
         return TCP_SERVER_ERROR;
     
-    client.target_host_fd = new File_Descriptor(sockfd);    // what happens to the previous fd object when we do this?
-    return TCP_SUCCESS;
+    if (ret != -1)
+        return ret; 
+    else 
+        return TCP_SUCCESS;
 }
 
 

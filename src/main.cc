@@ -1,9 +1,11 @@
+#define _POSIX_X_SOURCE
+
 #include "fd_util.h"
 #include "tcp.h"
 #include "epoll_util.h"
 #include "socks.h"
-#include <cstdlib> // exit()
 #include <sys/epoll.h>
+#include <signal.h> // sigaction(), struct sigaction
 #include <iostream> // perror()
 
 #define SOCKS5_PORT "1080"
@@ -13,6 +15,13 @@
 
 int main()
 {
+    // Ignore the SIGPIPE signal so that we may safely return EPIPE when write triggers this signal
+    struct sigaction sa;
+    sa.sa_handler = SIG_IGN;
+    sigemptyset (&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGPIPE, &sa, nullptr);
+
     int nfds;
     File_Descriptor listener;
     Epoll_Instance epoll_handle(MAX_EVENTS);
@@ -28,8 +37,9 @@ int main()
     {
         if (epoll_handle.add_to_interest(listener, FILE_DESCRIPTOR_REF, &listener, EPOLLIN | EPOLLET) == -1){
             perror("Epoll_Instance: add_to_interest(): epoll_ctl: EPOLL_CTL_ADD");
-            return -1;
+            return 1;
         }
+        // printf("added listener to epoll\n");
     }
     else
         return 1;
@@ -39,9 +49,15 @@ int main()
     {
         for (std::unordered_map<epoll_event_data*, bool>::iterator i =  epoll_handle.active_map.begin(); i != epoll_handle.active_map.end(); /* No increment condition here */)
         {
-            if (!i->second) continue;
+            if (!i->second){
+                i++;
+                continue;
+            }
             epoll_event_data_type& type = i->first->type;
-            if (type == FILE_DESCRIPTOR_REF || type == TARGET_CONNECTION_REF || type == TARGET_TIMER_REF) continue;
+            if (type == FILE_DESCRIPTOR_REF || type == TARGET_CONNECTION_REF || type == TARGET_TIMER_REF){
+                i++;
+                continue;
+            }
             SOCKS_Client* client = (SOCKS_Client*)i->first->ptr;
             bool erase_this = false;
 
@@ -62,8 +78,14 @@ int main()
                     // is timer nullptr or what ? do we need to check it ?
                     SOCKS_Returns ret = client->handle_request();
 
-                    if (ret == S5_EAGAIN) i->second = false;
-                    else if (ret == S5_RDAGAIN || ret == S5_WRAGAIN) continue;
+                    // std::cout<< "handle_request returned " << (int)ret << std::endl;
+                    if (ret == S5_EAGAIN && 
+                        (
+                            (!(client->cevents & S5E_IN) && (client && S5E_RDNEED)) || 
+                            (!(client->cevents & S5E_OUT) && (client && S5E_WRNEED))
+                        ))
+                        i->second = false;
+                    else if (ret == S5_RDAGAIN || ret == S5_WRAGAIN);
                     else if (ret == S5_ADD_TARGET_CONNECT_TIMER)
                     {
                         epoll_handle.add_to_interest(*client->target_host_fd, TARGET_CONNECTION_REF, client, EPOLLOUT | EPOLLET);
@@ -111,9 +133,8 @@ int main()
                     if (ev & S5E_IN)
                     {
                         SOCKS_Returns ret = client->handle_communication(type == CLIENT_REF, true);
-
-                        if (ret == S5_SUCCESS) i->second = false;
-                        else if (ret == S5_RDAGAIN || ret == S5_WRAGAIN) continue;
+                        // std::cout<< "handle_communication returned " << (int)ret << std::endl;
+                        if (ret == S5_SUCCESS || ret == S5_RDAGAIN || ret == S5_WRAGAIN);
                         else if (ret == S5_CONNECTION_CLOSED)
                         {
                             epoll_handle.remove_from_interest(fd);
@@ -123,15 +144,16 @@ int main()
                     if (ev & S5E_OUT)
                     {
                         SOCKS_Returns ret = client->handle_communication(type == CLIENT_REF, false);
-
-                        if (ret == S5_SUCCESS && (ev & S5E_WRNEED)) i->second = false;
-                        else if (ret == S5_RDAGAIN || ret == S5_WRAGAIN) continue;
+                        // std::cout<< "handle_communication returned " << (int)ret << std::endl;
+                        if (ret == S5_SUCCESS || ret == S5_RDAGAIN || ret == S5_WRAGAIN);
                         else if (ret == S5_CONNECTION_CLOSED)
                         {
                             epoll_handle.remove_from_interest(fd);
                             erase_this = true;
                         }
                     }
+                    if (!(ev & S5E_IN) && !(ev & S5E_OUT))
+                        i->second = false;
                 }
             }
 
@@ -144,7 +166,7 @@ int main()
                 i++;
         }
         
-        nfds = epoll_handle.get_events(-1);
+        nfds = epoll_handle.get_events(1000);
         if (nfds == -1)
         {
             perror("Epoll_Instance: epoll_wait()");
@@ -162,8 +184,10 @@ int main()
                 if (rcv_events & EPOLLIN)
                 {
                     File_Descriptor *triggered = (File_Descriptor*)ep_edata->ptr;
-                    if (*triggered == listener) 
+                    if (*triggered == listener)
                         epoll_handle.nonblocking_socks_client_accept(*triggered);
+                        // Need to handle the many requests from the same client for same thing so that the client doesn't clutter up
+                    // std::cout<< "came outside" << std::endl;
                 }
                 if (rcv_events & EPOLLPRI)
                 {
@@ -174,6 +198,7 @@ int main()
             }
             else if (ep_edata->type == SOCKS_CLIENT_REF)
             {
+                // std::cout<< "socks man" << std::endl;
                 SOCKS_Client *client = (SOCKS_Client*)ep_edata->ptr;
                 client->register_events(rcv_events, true);
                 epoll_handle.active_map[ep_edata] = true;
@@ -187,16 +212,17 @@ int main()
                 if (rcv_events & EPOLLOUT)
                 {
                     SOCKS_Returns ret = client->check_target_connection(false);
-                    if (ret == S5_SUCCESS)
-                    {
-                        ep_edata->type = TARGET_HOST_REF;
-                        epoll_handle.modify_event(*client->target_host_fd, ep_edata, EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLET);
-                    }
-                    else
-                    {
+                    // if (ret == S5_SUCCESS)
+                    // {
+                    //     // std::cout<< "connection successfull" << std::endl;
+                    //     ep_edata->type = TARGET_HOST_REF;
+                    //     epoll_handle.modify_event(*client->target_host_fd, ep_edata, EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLET);
+                    // }
+                    // else
+                    // {
                         epoll_handle.remove_from_interest(*client->target_host_fd);
                         erase = true;
-                    }
+                    // }
                 }
                 if (rcv_events & (EPOLLERR | EPOLLHUP))
                 {

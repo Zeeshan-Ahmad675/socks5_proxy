@@ -15,6 +15,9 @@
 
 
 
+// Remove all redundant _repeat_state
+
+
 #define c_read_avail (cevents & S5E_IN)
 #define c_write_avail (cevents & S5E_OUT)
 #define h_read_avail (hevents & S5E_IN)
@@ -48,6 +51,8 @@ const SOCKS_Returns SOCKS_Client::abstracted_read(size_t pre_read, size_t to_rea
 
         memcpy(_buffer + _buff_ptr_in, local_buff, _fd.get_last_read());
         _buff_ptr_in += _fd.get_last_read();
+        // std::cout<< "abstracted_read()" << std::endl;
+        // std::cout<< err << " " <<  _fd.get_last_read() << std::endl;
         delete[] local_buff;
 
         switch (err) {
@@ -59,7 +64,7 @@ const SOCKS_Returns SOCKS_Client::abstracted_read(size_t pre_read, size_t to_rea
                 cevents &= ~S5E_IN;
                 return S5_EAGAIN;
             default:
-                std::cout << strerror(err) << std::endl;
+                // std::cout<< strerror(err) << std::endl;
                 _state = CLOSED;
                 return S5_CONNECTION_CLOSED; 
         }
@@ -88,6 +93,8 @@ const SOCKS_Returns SOCKS_Client::abstracted_write(const uint8_t* set_init_buf, 
         err = _fd.nonblocking_write(set_init_buf + _buff_ptr_out, init_count - _buff_ptr_out);
         _buff_ptr_out += _fd.get_last_write();
 
+        // std::cout<< "inside abstracted_write()" << std::endl;
+        // std::cout<< err << " " <<  _fd.get_last_write() << std::endl;
         switch (err) {
             case 0:
                 break;
@@ -98,12 +105,12 @@ const SOCKS_Returns SOCKS_Client::abstracted_write(const uint8_t* set_init_buf, 
                 return S5_EAGAIN;
             case EDQUOT:
             case ENOSPC:
-                std::cout << strerror(err) << std::endl;
+                // std::cout<< strerror(err) << std::endl;
                 cevents |= S5E_WRNEED;
                 _repeat_state = _state;
                 return S5_WRAGAIN;
             default:
-                std::cout << strerror(err) << std::endl;
+                // std::cout<< strerror(err) << std::endl;
                 _state = CLOSED;
                 return S5_CONNECTION_CLOSED; 
         }
@@ -115,6 +122,8 @@ const SOCKS_Returns SOCKS_Client::abstracted_write(const uint8_t* set_init_buf, 
         err = _fd.nonblocking_write(local_buff, count - _buff_ptr_out);
         _buff_ptr_out += _fd.get_last_write();
         delete[] local_buff;
+        // std::cout<< "inside abstracted_write()" << std::endl;
+        // std::cout<< err << " " <<  _fd.get_last_write() << std::endl;
 
         switch (err) {
             case 0:
@@ -126,12 +135,12 @@ const SOCKS_Returns SOCKS_Client::abstracted_write(const uint8_t* set_init_buf, 
                 return S5_EAGAIN;
             case EDQUOT:
             case ENOSPC:
-                std::cout << strerror(err) << std::endl;
+                // std::cout<< strerror(err) << std::endl;
                 cevents |= S5E_WRNEED;
                 _repeat_state = _state;
                 return S5_WRAGAIN;
             default:
-                std::cout << strerror(err) << std::endl;
+                // std::cout<< strerror(err) << std::endl;
                 _state = CLOSED;
                 return S5_CONNECTION_CLOSED; 
         }
@@ -153,7 +162,6 @@ SOCKS_Returns SOCKS_Client::setup_communication()
     _hpipe = new Pipe();
     if (!_cpipe->valid() || !_hpipe->valid())
     {
-        SOCKS_Returns ret;
         if (_cpipe->fatal_err || _hpipe->fatal_err){
             _error = TCP_SERVER_ERROR;
             cevents |= S5E_WRNEED;
@@ -253,7 +261,7 @@ void SOCKS_Client::register_events(const uint32_t events, bool client)
 const SOCKS_Returns SOCKS_Client::handle_request() {
     if (_state == CLOSED)
         return S5_CONNECTION_CLOSED;
-    if (!c_read_avail || !c_write_avail) return S5_BAD_REQUEST;
+    if (!c_read_avail && !c_write_avail) return S5_BAD_REQUEST;
 
     if (_error != 0)
     {
@@ -275,7 +283,8 @@ const SOCKS_Returns SOCKS_Client::handle_request() {
                 SOCKS_WRITE(init_buff, 2, 2, true);
             }
         }
-        if (_buff_ptr_in > 2 && _buff_ptr_in < 2 + _buffer[1])
+        // std::cout<< "_buffer[1]" << +_buffer[1] << std::endl;
+        if (_buff_ptr_in >= 2 && _buff_ptr_in < 2 + _buffer[1])
             SOCKS_READ(2, _buffer[1]);
     }
     if (_buff_ptr_in == 2 + _buffer[1])
@@ -300,7 +309,7 @@ const SOCKS_Returns SOCKS_Client::handle_request() {
                 break;
             }
         }
-        if (i == 2 + _buffer[1])
+        if (i == _buff_ptr_in)
         {
             std::cerr << "SOCKS_Client: INITIAL: No supported authentication method" << std::endl;
             uint8_t init_buff[2] = { 0x05, 0xFF };
@@ -309,6 +318,7 @@ const SOCKS_Returns SOCKS_Client::handle_request() {
 
         SOCKS_WRITE(nullptr, 0, 2, false);
         _state = AUTHENTICATION;
+        _buff_ptr_in = 0; // Just for now. if we can find a better way later, remove it
     }
     
     if (_state == AUTHENTICATION)
@@ -320,8 +330,6 @@ const SOCKS_Returns SOCKS_Client::handle_request() {
 
     if (_state == REQUESTS)
     {
-        _buff_ptr_in = 0; // Just for now. if we can find a better way later, remove it
-
         if (_buff_ptr_in < 4)
             SOCKS_READ(0, 4);
         if (_buff_ptr_in == 4) {
@@ -343,7 +351,7 @@ const SOCKS_Returns SOCKS_Client::handle_request() {
                 uint8_t init_buff[4] = { 0x05, 0x02, 0x00, 0x01 }; // connection not allowed by ruleset
                 SOCKS_WRITE(init_buff, 4, 10, true);
             }
-            if (_buffer[3] != 0x01 || _buffer[3] != 0x03 || _buffer[3] != 0x04)
+            if (_buffer[3] != 0x01 && _buffer[3] != 0x03 && _buffer[3] != 0x04)
             {
                 std::cerr << "SOCKS_Client: REQUESTS: Unknown Address type" << std::endl;
                 uint8_t init_buff[4] = { 0x05, 0x08, 0x00, 0x01 }; // Address type not supported
@@ -371,8 +379,10 @@ const SOCKS_Returns SOCKS_Client::handle_request() {
     {
         // Currently only supports CONNECT
         if (_repeat_state != _state)
+        {
             _buffer[1] = (uint8_t)open_new_connection_to_target(*this);
-
+            _repeat_state = _state;
+        }
         uint8_t init_buff[4] = { 0x05, _buffer[1], 0x00, 0x01 };
 
         switch (_buffer[1]) {
@@ -383,12 +393,13 @@ const SOCKS_Returns SOCKS_Client::handle_request() {
                 SOCKS_Returns ret;
                 if ((ret = setup_communication()) == S5_SUCCESS);
                 else return ret;
-                SOCKS_WRITE(nullptr, 0, _buffer[3] == 0x01 ? 4 : 16, false);
+                SOCKS_WRITE(nullptr, 0, _buffer[3] == 0x01 ? 10 : 22, false);
                 _connected_to_target = true;
                 _state = COMMUNICATION;
                 return S5_SUCCESS;
             }
             case TCP_EAGAIN:
+                _repeat_state = NONE;
                 return S5_EAGAIN;
             default:
                 SOCKS_WRITE(init_buff, 4, 10, true);
@@ -399,6 +410,7 @@ const SOCKS_Returns SOCKS_Client::handle_request() {
 
 const SOCKS_Returns SOCKS_Client::handle_communication(const bool with_client, const bool read)
 {
+    // std::cout<< "with_client: " << with_client << " read: " << read << std::endl;
     if (_state != COMMUNICATION) return S5_BAD_REQUEST;
 
     int err;
@@ -415,18 +427,24 @@ const SOCKS_Returns SOCKS_Client::handle_communication(const bool with_client, c
             err = in.nonblocking_read_from(fd);
             if (in.get_last_read() && !(comp_ev & S5E_WRHUP))
                 comp_ev |= S5E_WRNEED;
+            // std::cout<< "read: " << in.get_last_read()  << " err: " << err << std::endl;
 
             if (err != 0)
             {
                 switch (err) {
                     case EAGAIN:
-                        ev &= (~S5E_IN & ~S5E_RDNEED);
-                        return S5_SUCCESS;
+                        // if (in.get_last_read())
+                        // {
+                        //     ev &= (~S5E_IN & ~S5E_RDNEED);
+                        //     return S5_SUCCESS;
+                        // }
+                        // else
+                            return S5_RDAGAIN;
                     case EBADF:
                     case EINVAL:
                     case ESPIPE:
                     default:
-                        std::cout << strerror(err) << std::endl;
+                        // std::cout<< strerror(err) << std::endl;
                         ev &= S5E_CLOSED;
                         return S5_CONNECTION_CLOSED;
                     case ENOMEM:
@@ -466,25 +484,29 @@ const SOCKS_Returns SOCKS_Client::handle_communication(const bool with_client, c
                 ev |= S5E_RDNEED;
                 return S5_RDAGAIN;
             }
-            int flag = ((ev & S5E_RDHUP) && !(ev & S5E_RDNEED)) ? 0 : SPLICE_F_MORE;
+            int flag = ((comp_ev & S5E_RDHUP) && !(comp_ev & S5E_RDNEED)) ? 0 : SPLICE_F_MORE;
             err = out.nonblocking_write_to(fd, flag);
+            // std::cout<< "write: " << out.get_last_write() << " err: " << err << std::endl;
 
             if (err != 0)
             {
                 switch (err) {
                     case EAGAIN:
-                        ev |= S5E_WRNEED;
-                        ev &= ~S5E_OUT;
+                        // if (out.get_last_write())
+                        //     ev &= ~S5E_OUT;
+                        // else
+                        //     return S5_WRAGAIN;
+                        // ev |= S5E_WRNEED;
                         break; // same returning value as of case when err=0 since that represents there is nothing in the pipe to write
                     case EBADF:
                     case EINVAL:
                     case ESPIPE:
                     default:
-                        std::cout << strerror(err) << std::endl;
+                        // std::cout<< strerror(err) << std::endl;
                         ev &= S5E_CLOSED;
                         return S5_CONNECTION_CLOSED;
                     case ENOMEM:
-                        std::cout << strerror(err) << std::endl;
+                        // std::cout<< strerror(err) << std::endl;
                         ev |= S5E_WRNEED;
                         return S5_WRAGAIN;
                 }
@@ -518,7 +540,7 @@ const SOCKS_Returns SOCKS_Client::check_target_connection(const bool using_var)
             cevents |= S5E_WRNEED;
             return S5_WRAGAIN;
         }
-        _state = COMMUNICATION;
+        // _state = COMMUNICATION;
         _connected_to_target = true;
         _buffer[1] = TCP_SUCCESS;
         return S5_SUCCESS;
@@ -529,7 +551,7 @@ const SOCKS_Returns SOCKS_Client::check_target_connection(const bool using_var)
 SOCKS_Client::~SOCKS_Client()
 {
     if (_cpipe != nullptr)
-        delete _cpipe;
+        delete _cpipe; // free(): double free detected in tcache 2
     if (_hpipe != nullptr)
         delete _hpipe;
     if (target_host_fd != nullptr)

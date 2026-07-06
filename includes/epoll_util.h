@@ -32,7 +32,7 @@ public:
     std::unordered_map<epoll_event_data*, bool> active_map;
 
     Epoll_Instance(int max_events);
-    bool is_valid() { return _epollfd == -1; }
+    bool is_valid() { return _epollfd != -1; }
     int add_to_interest(const File_Descriptor& fd, epoll_event_data_type ev_dtype, void* ev_daddr, uint32_t events_and_flags);
     int modify_event(const File_Descriptor& fd, epoll_event_data* ep_edata, uint32_t events_and_flags);
     int remove_from_interest(const File_Descriptor& fd) const;

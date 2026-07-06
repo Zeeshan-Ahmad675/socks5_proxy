@@ -5,7 +5,7 @@
 #include "socks.h"
 
 #define TCP_INPROGRESS 0x09
-#define TCP_EAGAIN -1
+#define TCP_EAGAIN 0x10
 #define TCP_SUCCESS 0x00
 #define TCP_SERVER_ERROR 0x01
 #define TCP_NETWORK_UNREACHABLE 0x03

@@ -19,12 +19,16 @@ public:
     explicit File_Descriptor();
     explicit File_Descriptor(int fd);
     File_Descriptor(File_Descriptor& other) = delete;
+    File_Descriptor(File_Descriptor&& other) noexcept;
+    File_Descriptor& operator=(File_Descriptor&& other) noexcept;
     
     int get_fd() const { return _fd; };
     ssize_t get_last_read() const { return _bytes_last_read; }
     ssize_t get_last_write() const { return _bytes_last_write; }
     bool operator==(const File_Descriptor& other) const;
     bool operator==(int other) const;
+    bool operator!=(const File_Descriptor& other) const;
+    bool operator!=(int other) const;
 
     int get_status_flags() const;
     int add_status_flags(int flags) const;

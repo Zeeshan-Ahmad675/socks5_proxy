@@ -9,10 +9,10 @@
 enum SOCKS_Events: uint8_t
 {
     S5E_FATAL = 1,          // No going back
-    S5E_RDHUP = 2,          // We can't read after the next EAGAIN on read from this socket
+    S5E_RDHUP = 2,          // We can't read after the next EAGAIN on read() from this socket. This is either registered using the EPOLLRDHUP flag of epoll functions or if read() returns 0
     S5E_WRHUP = 4,          // We can't  write on this socket now
     S5E_RDNEED = 8,         // We haven't finished reading this time, so there is still some data to be read
-                            // In case of COMMUNICATION (pipe/splice), this also mean that there might be some data in the to be read from socket to pipe
+                            // In case of COMMUNICATION (pipe/splice), this also mean that there might be some data to be read from socket to pipe
     S5E_WRNEED = 16,        // We haven't finished writing this time, so there is still some data to be written
                             // In case of COMMUNICATION (pipe/splice), this also mean that there might be some data in the pipe to be written to the socket
     S5E_IN = 32,            // There is some data available to be read

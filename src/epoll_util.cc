@@ -1,6 +1,7 @@
 #include "epoll_util.h" 
 #include "fd_util.h"
 #include "socks.h"
+#include <ostream>
 #include <systemd/sd-daemon.h>  // sd_is_socket()
 #include <cstdlib> // exit()
 #include <fcntl.h> // O_NONBLOCK
@@ -9,6 +10,7 @@
 
 
 Epoll_Instance::Epoll_Instance(int max_events)
+    : _epollfd(epoll_create1(0))
 {
     // Check if some flags are returned when we use epoll in the manual
 
@@ -20,7 +22,7 @@ Epoll_Instance::Epoll_Instance(int max_events)
         throw std::runtime_error("Epoll_Instance: max_events must be positive and nonzero");
 
     
-    if ((_epollfd = File_Descriptor(epoll_create1(0))) == -1)
+    if (_epollfd == -1)
         perror("Epoll_Instance: epoll_create");
 }
 
@@ -34,7 +36,7 @@ int Epoll_Instance::add_to_interest(const File_Descriptor& fd, epoll_event_data_
     active_map[ep_edata] = false;
 
     _ev.events = events_and_flags;
-    _ev.data.ptr = &ep_edata;
+    _ev.data.ptr = ep_edata;
 
     if (epoll_ctl(_epollfd.get_fd(), EPOLL_CTL_ADD, fd.get_fd(), &_ev) == -1)
         return errno;
@@ -86,12 +88,14 @@ int Epoll_Instance::nonblocking_socks_client_accept(File_Descriptor& listener)
     int listener_fd = listener.get_fd();
     if (!sd_is_socket(listener_fd, 0, 0, -1)) return -1;
 
-    int n = 0, i;
+    int i;
     sockaddr addr;
     socklen_t addrlen;
     // Check for other error conditions so that the loop doesn't constinue indefinitely
+    // std::cout<< "Here" << std::endl;
     while (true) {
         i = accept(listener_fd, &addr, &addrlen);
+        // std::cout<< i << std::endl;
         if (i == -1 && (errno == EWOULDBLOCK || errno == EAGAIN)) break;
         
         SOCKS_Client* client = new SOCKS_Client(i, O_NONBLOCK, addr, addrlen);
@@ -101,6 +105,7 @@ int Epoll_Instance::nonblocking_socks_client_accept(File_Descriptor& listener)
             continue;
         }
         
+        // std::cout<< "inside man" << std::endl;
         if (add_to_interest(client->get_file_descriptor(), SOCKS_CLIENT_REF, client, EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLET) != 0) {
             std::cerr << "Unable to add client to epoll interest list. Closing connection" << std::endl;
             delete client;
